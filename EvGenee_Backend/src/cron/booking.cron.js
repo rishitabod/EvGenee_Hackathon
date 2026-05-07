@@ -97,7 +97,7 @@ const initializeCronJobs = (io) => {
                     io.emit('station:capacity_changed', {
                         type: 'expiration',
                         count: expired.modifiedCount,
-                        timestamp: now,
+                        timestamp: new Date(),
                     });
                 }
             }

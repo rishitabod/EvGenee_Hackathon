@@ -7,6 +7,7 @@ const { HumanMessage, SystemMessage, AIMessage } = require("@langchain/core/mess
 const Station = require("../models/station.model");
 const Booking = require("../models/booking.model");
 const MessageModel = require("../models/message.model");
+const User = require("../models/user.model");
 const { GROQ_API_KEY, PLATFORM_FEE_PERCENTAGE } = require('../config/config');
 const axios = require("axios");
 const memory = new MemorySaver();
@@ -41,6 +42,11 @@ async function getRoadDistance(startCoords, endCoords) {
     return null;
   }
 }
+
+const timeToMinutes = (time) => {
+  const [h, m] = time.split(':').map(Number);
+  return h * 60 + m;
+};
 
 const minutesToTime = (minutes) => {
   const h = Math.floor(minutes / 60).toString().padStart(2, '0');
