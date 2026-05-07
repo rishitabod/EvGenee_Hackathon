@@ -82,6 +82,10 @@ const bookingSchema = new mongoose.Schema(
       type: Date,
       select: false,
     },
+    reminderSent: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );
@@ -93,7 +97,7 @@ bookingSchema.index(
 
 bookingSchema.index({ user: 1, status: 1 });
 
-bookingSchema.index({ station: 1, date: 1, status: 1 });
+bookingSchema.index({ station: 1, date: 1, connectorType: 1, status: 1, createdAt: 1 });
 
 const Booking = mongoose.model('Booking', bookingSchema);
 

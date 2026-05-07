@@ -5,7 +5,7 @@ const { JWT_KEY } = require('../config/config');
 
 const registerUser = async (req, res, next) => {
   try {
-    const { name, email, password, role, vehicle } = req.body;
+    const { name, email, password, role, vehicle, vehicleNumbers } = req.body;
 
   
     const existingUser = await User.findOne({ email });
@@ -139,15 +139,9 @@ const getProfile = async (req, res, next) => {
 
 const updateProfile = async (req, res, next) => {
   try {
-    const { name, vehicle } = req.body;
-    const updateData = {};
-    if (name) updateData.name = name;
-    if (vehicle) updateData.vehicle = vehicle;
-
-    const user = await User.findByIdAndUpdate(req.user.id, updateData, {
-      new: true,
-      runValidators: true,
-    });
+    const { name, vehicle, vehicleNumbers } = req.body;
+    
+    const user = await User.findById(req.user.id);
 
     if (!user) {
       return res.status(404).json({
@@ -159,7 +153,6 @@ const updateProfile = async (req, res, next) => {
     if (name) user.name = name;
     if (vehicle) user.vehicle = vehicle;
     
-    // Explicitly update vehicleNumbers if provided
     if (Array.isArray(vehicleNumbers)) {
       user.vehicleNumbers = vehicleNumbers;
       user.markModified('vehicleNumbers');

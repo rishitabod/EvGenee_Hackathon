@@ -8,6 +8,88 @@ const timeToMinutes = (time) => {
   return h * 60 + m;
 };
 
+const minutesToTime = (minutes) => {
+  const h = Math.floor(minutes / 60).toString().padStart(2, '0');
+  const m = (minutes % 60).toString().padStart(2, '0');
+  return `${h}:${m}`;
+};
+
+async function checkAvailability(stationId, date, connectorType, startTime, endTime, maxPorts) {
+  const bookingDate = new Date(date);
+  bookingDate.setHours(0, 0, 0, 0);
+
+  const existingBookings = await Booking.find({
+    station: stationId,
+    date: bookingDate,
+    connectorType,
+    $or: [
+      { status: { $in: ['confirmed', 'in-progress'] } },
+      { status: 'pending', createdAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) } }
+    ],
+  });
+
+  const reqStart = timeToMinutes(startTime);
+  const reqEnd = timeToMinutes(endTime);
+  const events = [];
+
+  for (const b of existingBookings) {
+    const bStart = timeToMinutes(b.startTime);
+    const bEnd = timeToMinutes(b.endTime);
+    if (bStart < reqEnd && bEnd > reqStart) {
+      events.push({ time: bStart, type: 1 });
+      events.push({ time: bEnd, type: -1 });
+    }
+  }
+  events.sort((a, b) => a.time - b.time || a.type);
+
+  let currentConcurrent = 0;
+  for (const b of existingBookings) {
+    if (reqStart >= timeToMinutes(b.startTime) && reqStart < timeToMinutes(b.endTime)) {
+      currentConcurrent++;
+    }
+  }
+
+  if (currentConcurrent >= maxPorts) return { available: false, time: startTime };
+
+  for (const event of events) {
+    if (event.time >= reqEnd) break;
+    if (event.time > reqStart) {
+      if (currentConcurrent >= maxPorts) {
+        return { available: false, time: minutesToTime(event.time) };
+      }
+    }
+    currentConcurrent += event.type;
+  }
+
+  return { available: true };
+}
+
+async function findNextAvailableSlot(stationId, date, connectorType, startTime, durationMinutes, maxPorts, stationOpeningHours) {
+  let currentStartMin = timeToMinutes(startTime);
+  const searchLimitMin = currentStartMin + 480; // Search up to 8 hours ahead
+  
+  let openMin = 0;
+  let closeMin = 1439;
+  if (stationOpeningHours) {
+    const [ot, ct] = stationOpeningHours.split('-').map(t => t.trim());
+    openMin = timeToMinutes(ot);
+    closeMin = timeToMinutes(ct);
+  }
+
+  // Move in 15-minute increments
+  while (currentStartMin + durationMinutes <= Math.min(searchLimitMin, closeMin)) {
+    currentStartMin += 15;
+    const nextStart = minutesToTime(currentStartMin);
+    const nextEnd = minutesToTime(currentStartMin + durationMinutes);
+    
+    const result = await checkAvailability(stationId, date, connectorType, nextStart, nextEnd, maxPorts);
+    if (result.available) {
+      return nextStart;
+    }
+  }
+  return null;
+}
+
 
 const isOverlapping = (startA, endA, startB, endB) => {
   const sA = timeToMinutes(startA);
@@ -67,58 +149,117 @@ const createBooking = async (req, res, next) => {
     const bookingDate = new Date(date);
     bookingDate.setHours(0, 0, 0, 0);
 
-    const existingBookings = await Booking.find({
-      station: stationId,
-      date: bookingDate,
-      status: { $in: ['pending', 'confirmed', 'in-progress'] },
-    });
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
+    if (bookingDate < today) {
+      return res.status(400).json({ success: false, message: 'Cannot book for a past date' });
+    }
 
-    const requestedStart = timeToMinutes(startTime);
-    const requestedEnd = timeToMinutes(endTime);
-
-    for (let minute = requestedStart; minute < requestedEnd; minute++) {
-      let concurrentCount = 0;
-      for (const booking of existingBookings) {
-        const bStart = timeToMinutes(booking.startTime);
-        const bEnd = timeToMinutes(booking.endTime);
-        if (minute >= bStart && minute < bEnd) {
-          concurrentCount++;
-        }
-      }
-
-      if (concurrentCount >= station.availablePorts) {
-        const conflictHour = Math.floor(minute / 60).toString().padStart(2, '0');
-        const conflictMin = (minute % 60).toString().padStart(2, '0');
-        return res.status(409).json({
-          success: false,
-          message: `No available ports at ${conflictHour}:${conflictMin}. All ${station.availablePorts} ports are booked.`,
-          suggestion: 'Try a different time slot',
-        });
+    if (bookingDate.getTime() === today.getTime()) {
+      const currentMinutes = now.getHours() * 60 + now.getMinutes();
+      if (timeToMinutes(startTime) <= currentMinutes) {
+        return res.status(400).json({ success: false, message: 'Cannot book a time slot in the past for today' });
       }
     }
 
+    const [existingBookings, userConflict] = await Promise.all([
+      Booking.find({
+        station: stationId,
+        date: bookingDate,
+        connectorType,
+        $or: [
+          { status: { $in: ['confirmed', 'in-progress'] } },
+          { status: 'pending', createdAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) } }
+        ],
+      }),
+      Booking.findOne({
+        user: userId,
+        date: bookingDate,
+        $and: [
+          {
+            $or: [
+              { status: { $in: ['confirmed', 'in-progress'] } },
+              { status: 'pending', createdAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) } }
+            ]
+          },
+          {
+            $or: [
+              {
+                $and: [
+                  { startTime: { $lt: endTime } },
+                  { endTime: { $gt: startTime } },
+                ],
+              },
+            ],
+          }
+        ]
+      })
+    ]);
 
-    const userConflict = await Booking.findOne({
-      user: userId,
-      date: bookingDate,
-      status: { $in: ['pending', 'confirmed', 'in-progress'] },
-      $or: [
-        {
-          $and: [
-            { startTime: { $lt: endTime } },
-            { endTime: { $gt: startTime } },
-          ],
-        },
-      ],
-    });
+    const requestedStart = timeToMinutes(startTime);
+    const requestedEnd = timeToMinutes(endTime);
+    
+    const pricingConfig = station.pricing.find(p => p.connectorType === connectorType);
+    const maxPorts = pricingConfig?.portCount || station.availablePorts;
 
+    // Optimized Concurrency Check using Sweep Line Algorithm
+    const events = [];
+    for (const booking of existingBookings) {
+      const bStart = timeToMinutes(booking.startTime);
+      const bEnd = timeToMinutes(booking.endTime);
+      
+      // Only consider bookings that overlap with our requested window
+      if (bStart < requestedEnd && bEnd > requestedStart) {
+        events.push({ time: bStart, type: 1 });
+        events.push({ time: bEnd, type: -1 });
+      }
+    }
+
+    // Sort events by time, then by type (end events first if times are equal)
+    events.sort((a, b) => a.time - b.time || a.type);
+
+    let currentConcurrent = 0;
+    // Check initial concurrency at requestedStart
+    for (const booking of existingBookings) {
+      const bStart = timeToMinutes(booking.startTime);
+      const bEnd = timeToMinutes(booking.endTime);
+      if (requestedStart >= bStart && requestedStart < bEnd) {
+        currentConcurrent++;
+      }
+    }
+
+    if (currentConcurrent >= maxPorts) {
+      const nextSlot = await findNextAvailableSlot(stationId, bookingDate, connectorType, startTime, requestedEnd - requestedStart, maxPorts, station.openingHours);
+      return res.status(409).json({
+        success: false,
+        message: `No available ${connectorType} ports at ${startTime}. All ${maxPorts} ports are booked.`,
+        nextAvailableSlot: nextSlot,
+        suggestion: nextSlot ? `Try booking at ${nextSlot} instead.` : 'Try a different date or station.',
+      });
+    }
+
+    for (const event of events) {
+      if (event.time >= requestedEnd) break;
+      if (event.time > requestedStart) {
+        if (currentConcurrent >= maxPorts) {
+          const conflictTime = minutesToTime(event.time);
+          const nextSlot = await findNextAvailableSlot(stationId, bookingDate, connectorType, startTime, requestedEnd - requestedStart, maxPorts, station.openingHours);
+          return res.status(409).json({
+            success: false,
+            message: `No available ${connectorType} ports at ${conflictTime}. All ${maxPorts} ports are booked.`,
+            nextAvailableSlot: nextSlot,
+            suggestion: nextSlot ? `Try booking at ${nextSlot} instead.` : 'Try a different date or station.',
+          });
+        }
+      }
+      currentConcurrent += event.type;
+    }
     if (userConflict) {
       return res.status(409).json({
         success: false,
         message: 'You already have an overlapping booking at this time',
         existingBooking: {
-          station: userConflict.station,
           startTime: userConflict.startTime,
           endTime: userConflict.endTime,
         },
@@ -128,12 +269,26 @@ const createBooking = async (req, res, next) => {
 
     const durationMinutes = requestedEnd - requestedStart;
     const pricing = station.pricing.find((p) => p.connectorType === connectorType);
-    const pricePerKWh = pricing ? pricing.priceperKWh : 0;
+    const basePricePerKWh = pricing ? pricing.priceperKWh : 0;
+    let finalPricePerKWh = basePricePerKWh;
+    let appliedMultiplier = 1.0;
 
+    if (station.peakPricing && station.peakPricing.length > 0) {
+      for (const peak of station.peakPricing) {
+        const peakStart = timeToMinutes(peak.startTime);
+        const peakEnd = timeToMinutes(peak.endTime);
+        if (requestedStart < peakEnd && requestedEnd > peakStart) {
+          if (peak.multiplier > appliedMultiplier) {
+            appliedMultiplier = peak.multiplier;
+            finalPricePerKWh = basePricePerKWh * peak.multiplier;
+          }
+        }
+      }
+    }
 
     const durationHours = durationMinutes / 60;
     const estimatedKWh = parseFloat((station.chargingSpeed * durationHours).toFixed(2));
-    const totalCost = parseFloat((estimatedKWh * pricePerKWh).toFixed(2));
+    const totalCost = parseFloat((estimatedKWh * finalPricePerKWh).toFixed(2));
     
     const platformFeePercentage = PLATFORM_FEE_PERCENTAGE;
     const platformFee = parseFloat(((totalCost * platformFeePercentage) / 100).toFixed(2));
@@ -261,6 +416,17 @@ const createBooking = async (req, res, next) => {
       });
     }
 
+    // Emit WebSocket event for capacity change
+    const io_cap = req.app.get('io');
+    if (io_cap) {
+      io_cap.emit('station:capacity_changed', {
+        stationId: booking.station,
+        connectorType: booking.connectorType,
+        status: booking.status,
+        timestamp: new Date()
+      });
+    }
+
     res.status(201).json({
       success: true,
       message: 'Booking confirmed successfully',
@@ -303,8 +469,15 @@ const checkAvailability = async (req, res, next) => {
     const matchQuery = {
       station: station._id,
       date: queryDate,
-      status: { $in: ['pending', 'confirmed', 'in-progress'] },
+      $or: [
+        { status: { $in: ['confirmed', 'in-progress'] } },
+        { status: 'pending', createdAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) } }
+      ],
     };
+    
+    if (connectorType) {
+      matchQuery.connectorType = connectorType;
+    }
 
     const bookings = await Booking.find(matchQuery).select(
       'startTime endTime connectorType status'
@@ -316,6 +489,10 @@ const checkAvailability = async (req, res, next) => {
       .map((t) => t.trim());
     const openMin = timeToMinutes(openTime);
     const closeMin = timeToMinutes(closeTime);
+
+    const maxPorts = connectorType
+      ? (station.pricing.find((p) => p.connectorType === connectorType)?.portCount || station.availablePorts)
+      : station.availablePorts;
 
     const slots = [];
     for (let min = openMin; min < closeMin; min += 30) {
@@ -330,12 +507,25 @@ const checkAvailability = async (req, res, next) => {
         }
       }
 
+      let isAvailable = overlapping < maxPorts;
+      
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      if (queryDate < today) {
+        isAvailable = false;
+      } else if (queryDate.getTime() === today.getTime()) {
+        const currentMinutes = now.getHours() * 60 + now.getMinutes();
+        if (min < currentMinutes) {
+          isAvailable = false;
+        }
+      }
+
       slots.push({
         startTime: slotStart,
         endTime: slotEnd,
-        availablePorts: Math.max(0, station.availablePorts - overlapping),
-        totalPorts: station.availablePorts,
-        isAvailable: overlapping < station.availablePorts,
+        availablePorts: Math.max(0, maxPorts - overlapping),
+        totalPorts: maxPorts,
+        isAvailable,
       });
     }
 
@@ -477,6 +667,16 @@ const cancelBooking = async (req, res, next) => {
       io.to(`user_${booking.user}`).emit('booking:cancelled', {
         bookingId: booking._id,
         status: 'cancelled',
+      });
+    }
+
+    // Emit WebSocket event for capacity change
+    if (io) {
+      io.emit('station:capacity_changed', {
+        stationId: booking.station,
+        connectorType: booking.connectorType,
+        status: booking.status,
+        timestamp: new Date()
       });
     }
 
@@ -737,57 +937,112 @@ const validateBooking = async (req, res, next) => {
     const bookingDate = new Date(date);
     bookingDate.setHours(0, 0, 0, 0);
 
-    const existingBookings = await Booking.find({
-      station: stationId,
-      date: bookingDate,
-      connectorType,
-      status: { $in: ['pending', 'confirmed', 'in-progress'] },
-    });
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-    const requestedStart = timeToMinutes(startTime);
-    const requestedEnd = timeToMinutes(endTime);
+    if (bookingDate < today) {
+      return res.status(400).json({ success: false, message: 'Cannot book for a past date' });
+    }
 
-    for (let minute = requestedStart; minute < requestedEnd; minute++) {
-      let concurrentCount = 0;
-      for (const booking of existingBookings) {
-        const bStart = timeToMinutes(booking.startTime);
-        const bEnd = timeToMinutes(booking.endTime);
-        if (minute >= bStart && minute < bEnd) {
-          concurrentCount++;
-        }
-      }
-      
-      if (concurrentCount >= station.availablePorts) {
-        const conflictHour = Math.floor(minute / 60).toString().padStart(2, '0');
-        const conflictMin = (minute % 60).toString().padStart(2, '0');
-        return res.status(409).json({
-          success: false,
-          message: `No available ports at ${conflictHour}:${conflictMin}. All ${station.availablePorts} ports are booked.`,
-          suggestion: 'Try a different time slot or connector type',
-        });
+    if (bookingDate.getTime() === today.getTime()) {
+      const currentMinutes = now.getHours() * 60 + now.getMinutes();
+      if (timeToMinutes(startTime) <= currentMinutes) {
+        return res.status(400).json({ success: false, message: 'Cannot book a time slot in the past for today' });
       }
     }
 
-    const userConflict = await Booking.findOne({
-      user: userId,
-      date: bookingDate,
-      status: { $in: ['pending', 'confirmed', 'in-progress'] },
-      $or: [
-        {
-          $and: [
-            { startTime: { $lt: endTime } },
-            { endTime: { $gt: startTime } },
-          ],
-        },
-      ],
-    });
+    const [existingBookings, userConflict] = await Promise.all([
+      Booking.find({
+        station: stationId,
+        date: bookingDate,
+        connectorType,
+        $or: [
+          { status: { $in: ['confirmed', 'in-progress'] } },
+          { status: 'pending', createdAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) } }
+        ],
+      }),
+      Booking.findOne({
+        user: userId,
+        date: bookingDate,
+        $and: [
+          {
+            $or: [
+              { status: { $in: ['confirmed', 'in-progress'] } },
+              { status: 'pending', createdAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) } }
+            ]
+          },
+          {
+            $or: [
+              {
+                $and: [
+                  { startTime: { $lt: endTime } },
+                  { endTime: { $gt: startTime } },
+                ],
+              },
+            ],
+          }
+        ]
+      })
+    ]);
+
+    const requestedStart = timeToMinutes(startTime);
+    const requestedEnd = timeToMinutes(endTime);
+    
+    const pricingConfig = station.pricing.find(p => p.connectorType === connectorType);
+    const maxPorts = pricingConfig?.portCount || station.availablePorts;
+
+    const events = [];
+    for (const booking of existingBookings) {
+      const bStart = timeToMinutes(booking.startTime);
+      const bEnd = timeToMinutes(booking.endTime);
+      if (bStart < requestedEnd && bEnd > requestedStart) {
+        events.push({ time: bStart, type: 1 });
+        events.push({ time: bEnd, type: -1 });
+      }
+    }
+    events.sort((a, b) => a.time - b.time || a.type);
+
+    let currentConcurrent = 0;
+    for (const booking of existingBookings) {
+      const bStart = timeToMinutes(booking.startTime);
+      const bEnd = timeToMinutes(booking.endTime);
+      if (requestedStart >= bStart && requestedStart < bEnd) {
+        currentConcurrent++;
+      }
+    }
+
+    if (currentConcurrent >= maxPorts) {
+      const nextSlot = await findNextAvailableSlot(stationId, bookingDate, connectorType, startTime, requestedEnd - requestedStart, maxPorts, station.openingHours);
+      return res.status(409).json({
+        success: false,
+        message: `No available ${connectorType} ports at ${startTime}.`,
+        nextAvailableSlot: nextSlot,
+        suggestion: nextSlot ? `Try booking at ${nextSlot} instead.` : 'Try a different date or station.',
+      });
+    }
+
+    for (const event of events) {
+      if (event.time >= requestedEnd) break;
+      if (event.time > requestedStart) {
+        if (currentConcurrent >= maxPorts) {
+          const conflictTime = minutesToTime(event.time);
+          const nextSlot = await findNextAvailableSlot(stationId, bookingDate, connectorType, startTime, requestedEnd - requestedStart, maxPorts, station.openingHours);
+          return res.status(409).json({
+            success: false,
+            message: `No available ${connectorType} ports at ${conflictTime}. All ${maxPorts} ports are booked.`,
+            nextAvailableSlot: nextSlot,
+            suggestion: nextSlot ? `Try booking at ${nextSlot} instead.` : 'Try a different date or station.',
+          });
+        }
+      }
+      currentConcurrent += event.type;
+    }
 
     if (userConflict) {
       return res.status(409).json({
         success: false,
         message: 'You already have an overlapping booking at this time',
         existingBooking: {
-          station: userConflict.station,
           startTime: userConflict.startTime,
           endTime: userConflict.endTime,
         },
@@ -809,6 +1064,18 @@ const confirmAdvancePayment = async (req, res, next) => {
     const booking = await Booking.findById(bookingId).populate('user').populate('station');
 
     if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+    
+    // Check for 10-minute expiration
+    if (booking.status === 'pending') {
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+      if (booking.createdAt < tenMinutesAgo) {
+        booking.status = 'cancelled';
+        booking.cancellationReason = 'Payment timeout (10 minutes)';
+        await booking.save();
+        return res.status(400).json({ success: false, message: 'Payment window expired (10 minutes). This booking has been cancelled.' });
+      }
+    }
+
     if (booking.status !== 'pending') return res.status(400).json({ success: false, message: `Cannot confirm. Booking is already ${booking.status}` });
 
     const otp = generateOtp();

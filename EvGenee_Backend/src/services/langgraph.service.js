@@ -42,10 +42,83 @@ async function getRoadDistance(startCoords, endCoords) {
   }
 }
 
-const timeToMinutes = (time) => {
-  const [h, m] = time.split(':').map(Number);
-  return h * 60 + m;
+const minutesToTime = (minutes) => {
+  const h = Math.floor(minutes / 60).toString().padStart(2, '0');
+  const m = (minutes % 60).toString().padStart(2, '0');
+  return `${h}:${m}`;
 };
+
+async function checkAvailability(stationId, date, connectorType, startTime, endTime, maxPorts) {
+  const bookings = await Booking.find({
+    station: stationId,
+    date,
+    connectorType,
+    $or: [
+      { status: { $in: ['confirmed', 'in-progress'] } },
+      { status: 'pending', createdAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) } }
+    ],
+  });
+
+  const reqStart = timeToMinutes(startTime);
+  const reqEnd = timeToMinutes(endTime);
+  const events = [];
+
+  for (const b of bookings) {
+    const bStart = timeToMinutes(b.startTime);
+    const bEnd = timeToMinutes(b.endTime);
+    if (bStart < reqEnd && bEnd > reqStart) {
+      events.push({ time: bStart, type: 1 });
+      events.push({ time: bEnd, type: -1 });
+    }
+  }
+  events.sort((a, b) => a.time - b.time || a.type);
+
+  let currentConcurrent = 0;
+  for (const b of bookings) {
+    if (reqStart >= timeToMinutes(b.startTime) && reqStart < timeToMinutes(b.endTime)) {
+      currentConcurrent++;
+    }
+  }
+
+  if (currentConcurrent >= maxPorts) return { available: false, time: startTime };
+
+  for (const event of events) {
+    if (event.time >= reqEnd) break;
+    if (event.time > reqStart) {
+      if (currentConcurrent >= maxPorts) {
+        return { available: false, time: minutesToTime(event.time) };
+      }
+    }
+    currentConcurrent += event.type;
+  }
+
+  return { available: true };
+}
+
+async function findNextAvailableSlot(stationId, date, connectorType, startTime, durationMinutes, maxPorts, stationOpeningHours) {
+  let currentStartMin = timeToMinutes(startTime);
+  const searchLimitMin = currentStartMin + 480; 
+  
+  let openMin = 0;
+  let closeMin = 1439;
+  if (stationOpeningHours) {
+    const [ot, ct] = stationOpeningHours.split('-').map(t => t.trim());
+    openMin = timeToMinutes(ot);
+    closeMin = timeToMinutes(ct);
+  }
+
+  while (currentStartMin + durationMinutes <= Math.min(searchLimitMin, closeMin)) {
+    currentStartMin += 15;
+    const nextStart = minutesToTime(currentStartMin);
+    const nextEnd = minutesToTime(currentStartMin + durationMinutes);
+    
+    const result = await checkAvailability(stationId, date, connectorType, nextStart, nextEnd, maxPorts);
+    if (result.available) {
+      return nextStart;
+    }
+  }
+  return null;
+}
 
 const isOverlapping = (startA, endA, startB, endB) => {
   const sA = timeToMinutes(startA);
@@ -65,7 +138,7 @@ const findBestStationTool = tool(
         location: {
           $near: {
             $geometry: { type: "Point", coordinates: coords },
-            $maxDistance: 400000
+            $maxDistance: 4000000
           }
         }
       }).limit(5);
@@ -79,76 +152,58 @@ const findBestStationTool = tool(
         queryDate = new Date(); 
       }
       queryDate.setHours(0, 0, 0, 0);
-      let result = "";
-      let foundAvailable = false;
+      
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+      if (queryDate < today) {
+        return JSON.stringify({ error: "Cannot search for past dates." });
+      }
+
+      if (queryDate.getTime() === today.getTime()) {
+        const currentMinutes = now.getHours() * 60 + now.getMinutes();
+        if (timeToMinutes(startTime) <= currentMinutes) {
+          return JSON.stringify({ error: "The requested start time has already passed for today. Please provide a future time." });
+        }
+      }
+
+      let exactMatchStation = null;
+      let exactMatchRoadInfo = null;
+      let validStations = [];
 
       for (const st of stations) {
-
-        if (!st.typeOfConnectors.includes(chargerType)) {
-           result += ` ${st.name} in ${st.address.city} does NOT support ${chargerType} (Available: ${st.typeOfConnectors.join(', ')}).\n`;
-           continue;
-        }
-
+        if (!st.typeOfConnectors.includes(chargerType)) continue;
+        if (!st.isOpen) continue;
         
-        if (!st.isOpen) {
-           result += ` ${st.name} in ${st.address.city} is currently CLOSED.\n`;
-           continue;
-        }
+        validStations.push(st);
 
         const bookings = await Booking.find({
           station: st._id,
           date: queryDate,
-          status: { $in: ['pending', 'confirmed', 'in-progress'] },
+          connectorType: chargerType,
+          $or: [
+            { status: { $in: ['confirmed', 'in-progress'] } },
+            { status: 'pending', createdAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) } }
+          ],
         });
 
+        // Optimized Concurrency Check for AI
+        const pricingConfig = st.pricing.find(p => p.connectorType === chargerType);
+        const maxPorts = pricingConfig?.portCount || st.availablePorts;
+        const requestedDuration = timeToMinutes(endTime) - timeToMinutes(startTime);
 
-        let overlapping = 0;
-        for (const b of bookings) {
-          if (isOverlapping(startTime, endTime, b.startTime, b.endTime)) {
-            overlapping++;
-          }
-        }
+        const availabilityResult = await checkAvailability(st._id, queryDate, chargerType, startTime, endTime, maxPorts);
 
-        if (overlapping < st.availablePorts) {
-          const roadInfo = await getRoadDistance(coords, st.location.coordinates);
-          let distanceStr = "";
-          if (roadInfo) {
-            distanceStr = ` (approx. ${roadInfo.distanceKm} KM, ${roadInfo.durationMins} mins away by road)`;
-          }
-          result += ` ${st.name}${distanceStr} in ${st.address.city} is AVAILABLE from ${startTime} to ${endTime}.\n`;
-          foundAvailable = true;
-          break;
+        if (availabilityResult.available) {
+          exactMatchStation = st;
+          exactMatchRoadInfo = await getRoadDistance(coords, st.location.coordinates);
+          break; 
         } else {
-          
-          result += `${st.name} is FULLY BOOKED at that time. `;
-
-
-          const reqStartMins = timeToMinutes(startTime);
-          const duration = timeToMinutes(endTime) - reqStartMins;
-
-          let altFound = false;
-      // i am finding alt hour
-          for (let offset = 60; offset <= 240; offset += 60) {
-            const altStartMins = reqStartMins + offset;
-            const altEndMins = altStartMins + duration;
-
-            if (altStartMins >= 24 * 60 || altEndMins >= 24 * 60) continue;
-
-            const altStart = `${Math.floor(altStartMins / 60).toString().padStart(2, '0')}:${(altStartMins % 60).toString().padStart(2, '0')}`;
-            const altEnd = `${Math.floor(altEndMins / 60).toString().padStart(2, '0')}:${(altEndMins % 60).toString().padStart(2, '0')}`;
-
-            let altOverlapping = 0;
-            for (const b of bookings) {
-              if (isOverlapping(altStart, altEnd, b.startTime, b.endTime)) altOverlapping++;
-            }
-
-            if (altOverlapping < st.availablePorts) {
-              result += `However, it is AVAILABLE later from ${altStart} to ${altEnd}.\n`;
-              altFound = true;
-              break;
-            }
+          // If this station is full, check for next available slot to suggest
+          const nextSlot = await findNextAvailableSlot(st._id, queryDate, chargerType, startTime, requestedDuration, maxPorts, st.openingHours);
+          if (nextSlot) {
+            st.nextAvailableSlot = nextSlot;
           }
-          if (!altFound) result += `No nearby slots available either.\n`;
         }
       }
 
@@ -165,15 +220,83 @@ const findBestStationTool = tool(
           chargingSpeed: st.chargingSpeed,
           pricing: st.pricing,
           isCompatible: st.typeOfConnectors.includes(chargerType),
+          nextAvailableSlot: st.nextAvailableSlot || null,
           roadDistance: roadInfo ? roadInfo.distanceKm : null,
           travelTime: roadInfo ? roadInfo.durationMins : null
         };
       }));
 
+      if (exactMatchStation) {
+        let distanceStr = exactMatchRoadInfo ? ` (approx. ${exactMatchRoadInfo.distanceKm} KM, ${exactMatchRoadInfo.durationMins} mins away by road)` : "";
+        return JSON.stringify({
+          text: `Found a great match! ${exactMatchStation.name}${distanceStr} in ${exactMatchStation.address.city} is AVAILABLE from ${startTime} to ${endTime}.\nWould you like me to book it for you?`,
+          stations: stationsData,
+          foundAvailable: true
+        });
+      }
+
+      if (validStations.length === 0) {
+        return JSON.stringify({ 
+          error: `I couldn't find any nearby stations that are open and support ${chargerType} connectors.`,
+          stations: stationsData,
+          foundAvailable: false
+        });
+      }
+
+      let altMatch = null;
+      const reqStartMins = timeToMinutes(startTime);
+      const duration = timeToMinutes(endTime) - reqStartMins;
+
+      for (const st of validStations) {
+        const bookings = await Booking.find({
+          station: st._id,
+          date: queryDate,
+          connectorType: chargerType,
+          $or: [
+            { status: { $in: ['confirmed', 'in-progress'] } },
+            { status: 'pending', createdAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) } }
+          ],
+        });
+
+        const pricingConfig = st.pricing.find(p => p.connectorType === chargerType);
+        const maxPorts = pricingConfig?.portCount || st.availablePorts;
+
+        for (let offset = 60; offset <= 240; offset += 60) {
+          const altStartMins = reqStartMins + offset;
+          const altEndMins = altStartMins + duration;
+
+          if (altStartMins >= 24 * 60 || altEndMins >= 24 * 60) continue;
+
+          const altStart = `${Math.floor(altStartMins / 60).toString().padStart(2, '0')}:${(altStartMins % 60).toString().padStart(2, '0')}`;
+          const altEnd = `${Math.floor(altEndMins / 60).toString().padStart(2, '0')}:${(altEndMins % 60).toString().padStart(2, '0')}`;
+
+          let altOverlapping = 0;
+          for (const b of bookings) {
+            if (isOverlapping(altStart, altEnd, b.startTime, b.endTime)) altOverlapping++;
+          }
+
+          if (altOverlapping < maxPorts) {
+            const roadInfo = await getRoadDistance(coords, st.location.coordinates);
+            altMatch = { st, altStart, altEnd, roadInfo };
+            break;
+          }
+        }
+        if (altMatch) break; 
+      }
+
+      if (altMatch) {
+        let distanceStr = altMatch.roadInfo ? ` (approx. ${altMatch.roadInfo.distanceKm} KM, ${altMatch.roadInfo.durationMins} mins away)` : "";
+        return JSON.stringify({
+          text: `The requested time slot is fully booked at nearby stations. However, ${altMatch.st.name}${distanceStr} is AVAILABLE later from ${altMatch.altStart} to ${altMatch.altEnd}.\nWould you like to book this alternative slot instead?`,
+          stations: stationsData,
+          foundAvailable: true
+        });
+      }
+
       return JSON.stringify({
-        text: result + (foundAvailable ? "\nWould you like me to book one of these available slots for you?" : ""),
+        error: `Sorry, all nearby stations are fully booked for ${chargerType} connectors around that time.`,
         stations: stationsData,
-        foundAvailable
+        foundAvailable: false
       });
     } catch (err) {
       console.error("Tool Error:", err);
@@ -205,6 +328,20 @@ const createBookingTool = (userInfo) => tool(
       }
       bookingDate.setHours(0, 0, 0, 0);
 
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+      if (bookingDate < today) {
+        return JSON.stringify({ error: "Cannot book for a past date." });
+      }
+
+      if (bookingDate.getTime() === today.getTime()) {
+        const currentMinutes = now.getHours() * 60 + now.getMinutes();
+        if (timeToMinutes(startTime) <= currentMinutes) {
+          return JSON.stringify({ error: "Cannot book a time slot in the past for today." });
+        }
+      }
+
       const requestedStart = timeToMinutes(startTime);
       const requestedEnd = timeToMinutes(endTime);
       const durationMinutes = requestedEnd - requestedStart;
@@ -213,9 +350,16 @@ const createBookingTool = (userInfo) => tool(
       const existingBookings = await Booking.find({
         station: stationId,
         date: bookingDate,
-        status: { $in: ['pending', 'confirmed', 'in-progress'] },
+        connectorType: chargerType,
+        $or: [
+          { status: { $in: ['confirmed', 'in-progress'] } },
+          { status: 'pending', createdAt: { $gt: new Date(Date.now() - 10 * 60 * 1000) } }
+        ],
       });
       
+      const pricingConfig = station.pricing.find(p => p.connectorType === chargerType);
+      const maxPorts = pricingConfig?.portCount || station.availablePorts;
+
       let overlapping = 0;
       for (const b of existingBookings) {
         if (isOverlapping(startTime, endTime, b.startTime, b.endTime)) {
@@ -223,7 +367,7 @@ const createBookingTool = (userInfo) => tool(
         }
       }
       
-      if (overlapping >= station.availablePorts) {
+      if (overlapping >= maxPorts) {
         return JSON.stringify({ error: "Conflict detected: This slot is no longer available. Please try another time." });
       }
 
@@ -275,31 +419,37 @@ const createBookingTool = (userInfo) => tool(
   }
 );
 
-const getSystemPrompt = () => {
+const getSystemPrompt = async (userId) => {
   const now = new Date();
   const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   const timeStr = now.toLocaleTimeString('en-US');
   
+  const user = await User.findById(userId);
+  const profileInfo = user ? `\nUser Profile Info:\n- Name: ${user.name}\n- Vehicle Type: ${user.vehicle?.type || 'Not specified'}\n- Preferred Connector: ${user.vehicle?.connectorType || 'Not specified'}\n- Saved Vehicle Numbers: ${user.vehicleNumbers?.join(', ') || 'None'}\n` : "";
+
   return new SystemMessage(`You are EvGenee, a helpful, polite, and efficient voice assistant for EV Charging Station bookings.
+Ritul Jain my creator trained me on the specific platform. I must only respond to questions related to EvGenee and EV charging.
+For any out-of-topic questions, I must say: "Ritul Jain my creator trained me on the specific platform."
 
-CRITICAL CONTEXT:
-Today is ${dateStr}. The current time is ${timeStr}.
-Do not allow users to book time slots that have already passed today or dates in the past. If they ask for "today" or a time that has already passed, politely inform them and ask for a valid future time.
+Current context:
+${profileInfo}
 
-FLOW:
-1. GATHER: Ensure you have Location, Date, Start Time, End Time/Duration, and Charger Type. Ask clarifying questions naturally.
-2. SEARCH: Once you have all 5, call 'find_best_station'.
-3. SUGGEST: Suggest the available station(s) found. Mention name and city.
-4. CONFIRM & BOOK: If the user says "Yes", "Confirm", or "Book it", call 'create_booking' using the stationId and details from the search results.
-5. Do not provide long long answers and do not use special characters in your response. provide consise and perfect output also try to understand his/her intent.
+When searching for stations:
+1. If the user doesn't specify a connector type, use their "Preferred Connector" from the profile info above if available.
+2. If they have saved vehicle numbers, use them if relevant.
+3. Always check availability and mention the next available slot if the current one is full.
+4. Suggest the best station based on road distance and travel time.
 
-CRITICAL INSTRUCTIONS:
+Important:
+- Only book if the user confirms the details.
+- Always be polite and professional.
 - Do not use markdown (asterisks, etc.) in your final response.
 - When 'create_booking' is successful, tell the user their booking is reserved (pending) and they MUST go to My Bookings and pay the advance within 10 minutes to confirm it, or it will be auto-cancelled.
-- Be concise and friendly.`);
+- Be concise and friendly.
+- Do not provide long answers.`);
 };
 
-function createVoiceAgent(userInfo) {
+function createVoiceAgent(userInfo, systemPrompt) {
   const llm = new ChatGroq({
     model: "openai/gpt-oss-20b",
     temperature: 0.1,
@@ -312,7 +462,7 @@ function createVoiceAgent(userInfo) {
     llm,
     tools,
     checkpointSaver: memory,
-    messageModifier: getSystemPrompt(),
+    messageModifier: systemPrompt,
   });
 
   return agent;
@@ -321,6 +471,7 @@ function createVoiceAgent(userInfo) {
 async function processVoiceChat(message, threadId, userInfo) {
   try {
     const history = await MessageModel.find({ threadId }).sort({ createdAt: 1 });
+    const systemMessage = await getSystemPrompt(userInfo.userId);
     const formattedHistory = history.map(msg => {
       if (msg.role === 'user') return new HumanMessage(msg.content);
       return new AIMessage(msg.content);
@@ -364,7 +515,7 @@ async function processVoiceChat(message, threadId, userInfo) {
             bookingId = content.bookingId;
           }
         } catch (e) {
-          // Ignore parse errors for non-json tool outputs
+           console.log(`Error in toolmessages ${e.message}`);
         }
       }
     }

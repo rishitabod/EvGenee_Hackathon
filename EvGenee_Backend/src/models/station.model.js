@@ -53,6 +53,7 @@ const stationSchema = new mongoose.Schema({
       {
         priceperKWh: { type: Number, required: true },
         connectorType: { type: String, required: true },
+        portCount: { type: Number, required: true, default: 1 },
         currency: {
           type: String,
           enum: ["USD", "EUR", "INR"],
@@ -61,6 +62,16 @@ const stationSchema = new mongoose.Schema({
       },
     ],
     required: true,
+  },
+  peakPricing: {
+    type: [
+      {
+        startTime: { type: String },
+        endTime: { type: String },
+        multiplier: { type: Number, default: 1.0 },
+      }
+    ],
+    default: []
   },
   isOpen: {
     type: Boolean,
