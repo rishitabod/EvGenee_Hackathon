@@ -150,14 +150,19 @@ const createBooking = async (req, res, next) => {
     bookingDate.setHours(0, 0, 0, 0);
 
     const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const indianTimeStr = now.toLocaleString("en-US", { timeZone: "Asia/Kolkata", hour12: false });
+    const [datePart, timePart] = indianTimeStr.split(', ');
+    const [currH, currM] = timePart.split(':').map(Number);
+    const currentMinutes = currH * 60 + currM;
+
+    const today = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+    today.setHours(0, 0, 0, 0);
 
     if (bookingDate < today) {
       return res.status(400).json({ success: false, message: 'Cannot book for a past date' });
     }
 
     if (bookingDate.getTime() === today.getTime()) {
-      const currentMinutes = now.getHours() * 60 + now.getMinutes();
       if (timeToMinutes(startTime) <= currentMinutes) {
         return res.status(400).json({ success: false, message: 'Cannot book a time slot in the past for today' });
       }
@@ -542,7 +547,11 @@ const checkAvailability = async (req, res, next) => {
       if (queryDate < today) {
         isAvailable = false;
       } else if (queryDate.getTime() === today.getTime()) {
-        const currentMinutes = now.getHours() * 60 + now.getMinutes();
+        const indianTimeStr = now.toLocaleString("en-US", { timeZone: "Asia/Kolkata", hour12: false });
+        const timePart = indianTimeStr.split(', ')[1];
+        const [currH, currM] = timePart.split(':').map(Number);
+        const currentMinutes = currH * 60 + currM;
+        
         if (min < currentMinutes) {
           isAvailable = false;
         }

@@ -38,7 +38,36 @@ const createBookingValidation = [
 
     body('startTime')
         .notEmpty().withMessage('Start time is required')
-        .matches(/^([01]\d|2[0-3]):([0-5]\d)$/).withMessage('Start time must be in HH:MM (24-hour) format'),
+        .matches(/^([01]\d|2[0-3]):([0-5]\d)$/).withMessage('Start time must be in HH:MM (24-hour) format')
+        .custom((value, { req }) => {
+            const { date } = req.body;
+            if (!date) return true;
+            
+            const bookingDate = new Date(date);
+            const now = new Date();
+            
+            // Get current time in India (IST) to ensure consistency regardless of server timezone
+            const indianTimeStr = now.toLocaleString("en-US", { timeZone: "Asia/Kolkata", hour12: false });
+            const [datePart, timePart] = indianTimeStr.split(', ');
+            const [currH, currM] = timePart.split(':').map(Number);
+            const currentMinutes = currH * 60 + currM;
+
+            const today = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+            today.setHours(0, 0, 0, 0);
+            
+            const bDay = new Date(bookingDate);
+            bDay.setHours(0, 0, 0, 0);
+
+            if (bDay.getTime() === today.getTime()) {
+                const [reqH, reqM] = value.split(':').map(Number);
+                const requestedMinutes = reqH * 60 + reqM;
+
+                if (requestedMinutes <= currentMinutes) {
+                    throw new Error('Start time cannot be in the past for today');
+                }
+            }
+            return true;
+        }),
 
     body('endTime')
         .notEmpty().withMessage('End time is required')
