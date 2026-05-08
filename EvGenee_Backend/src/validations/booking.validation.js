@@ -53,8 +53,8 @@ const createBookingValidation = [
                 throw new Error('End time must be after start time');
             }
             const duration = endMinutes - startMinutes;
-            if (duration < 30) {
-                throw new Error('Minimum booking duration is 30 minutes');
+            if (duration < 60) {
+                throw new Error('Booking duration cannot be less than 1 hour');
             }
             if (duration > 480) {
                 throw new Error('Maximum booking duration is 8 hours');

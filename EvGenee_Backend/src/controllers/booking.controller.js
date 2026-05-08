@@ -54,11 +54,11 @@ async function checkPortAvailability(stationId, date, connectorType, startTime, 
   for (const event of events) {
     if (event.time >= reqEnd) break;
     if (event.time > reqStart) {
+      currentConcurrent += event.type;
       if (currentConcurrent >= maxPorts) {
         return { available: false, time: minutesToTime(event.time) };
       }
     }
-    currentConcurrent += event.type;
   }
 
   return { available: true };
@@ -242,6 +242,7 @@ const createBooking = async (req, res, next) => {
     for (const event of events) {
       if (event.time >= requestedEnd) break;
       if (event.time > requestedStart) {
+        currentConcurrent += event.type;
         if (currentConcurrent >= maxPorts) {
           const conflictTime = minutesToTime(event.time);
           const nextSlot = await findNextAvailableSlot(stationId, bookingDate, connectorType, startTime, requestedEnd - requestedStart, maxPorts, station.openingHours);
@@ -253,7 +254,6 @@ const createBooking = async (req, res, next) => {
           });
         }
       }
-      currentConcurrent += event.type;
     }
     if (userConflict) {
       return res.status(409).json({
@@ -501,11 +501,39 @@ const checkAvailability = async (req, res, next) => {
 
 
       let overlapping = 0;
+      // Use Sweep Line for slot availability check too
+      const slotEvents = [];
       for (const b of bookings) {
-        if (isOverlapping(slotStart, slotEnd, b.startTime, b.endTime)) {
-          overlapping++;
+        const bStart = timeToMinutes(b.startTime);
+        const bEnd = timeToMinutes(b.endTime);
+        if (bStart < timeToMinutes(slotEnd) && bEnd > timeToMinutes(slotStart)) {
+          slotEvents.push({ time: bStart, type: 1 });
+          slotEvents.push({ time: bEnd, type: -1 });
         }
       }
+      slotEvents.sort((a, b) => a.time - b.time || a.type);
+
+      let maxOverlappingInSlot = 0;
+      let currentInSlot = 0;
+      // Initial count
+      const slotStartMin = timeToMinutes(slotStart);
+      for (const b of bookings) {
+        if (slotStartMin >= timeToMinutes(b.startTime) && slotStartMin < timeToMinutes(b.endTime)) {
+          currentInSlot++;
+        }
+      }
+      maxOverlappingInSlot = currentInSlot;
+
+      for (const e of slotEvents) {
+        if (e.time >= timeToMinutes(slotEnd)) break;
+        if (e.time > slotStartMin) {
+          currentInSlot += e.type;
+          if (currentInSlot > maxOverlappingInSlot) {
+            maxOverlappingInSlot = currentInSlot;
+          }
+        }
+      }
+      overlapping = maxOverlappingInSlot;
 
       let isAvailable = overlapping < maxPorts;
       

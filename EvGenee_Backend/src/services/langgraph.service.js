@@ -91,11 +91,11 @@ async function checkAvailability(stationId, date, connectorType, startTime, endT
   for (const event of events) {
     if (event.time >= reqEnd) break;
     if (event.time > reqStart) {
+      currentConcurrent += event.type;
       if (currentConcurrent >= maxPorts) {
         return { available: false, time: minutesToTime(event.time) };
       }
     }
-    currentConcurrent += event.type;
   }
 
   return { available: true };
@@ -352,6 +352,10 @@ const createBookingTool = (userInfo) => tool(
       const requestedEnd = timeToMinutes(endTime);
       const durationMinutes = requestedEnd - requestedStart;
 
+      if (durationMinutes < 60) {
+        return JSON.stringify({ error: "Booking duration cannot be less than 1 hour." });
+      }
+
       
       const existingBookings = await Booking.find({
         station: stationId,
@@ -366,14 +370,9 @@ const createBookingTool = (userInfo) => tool(
       const pricingConfig = station.pricing.find(p => p.connectorType === chargerType);
       const maxPorts = pricingConfig?.portCount || station.availablePorts;
 
-      let overlapping = 0;
-      for (const b of existingBookings) {
-        if (isOverlapping(startTime, endTime, b.startTime, b.endTime)) {
-          overlapping++;
-        }
-      }
+      const availabilityResult = await checkAvailability(stationId, bookingDate, chargerType, startTime, endTime, maxPorts);
       
-      if (overlapping >= maxPorts) {
+      if (!availabilityResult.available) {
         return JSON.stringify({ error: "Conflict detected: This slot is no longer available. Please try another time." });
       }
 
@@ -434,8 +433,8 @@ const getSystemPrompt = async (userId) => {
   const profileInfo = user ? `\nUser Profile Info:\n- Name: ${user.name}\n- Vehicle Type: ${user.vehicle?.type || 'Not specified'}\n- Preferred Connector: ${user.vehicle?.connectorType || 'Not specified'}\n- Saved Vehicle Numbers: ${user.vehicleNumbers?.join(', ') || 'None'}\n` : "";
 
   return new SystemMessage(`You are EvGenee, a helpful, polite, and efficient voice assistant for EV Charging Station bookings.
-Ritul Jain my creator trained me on the specific platform. I must only respond to questions related to EvGenee and EV charging.
-For any out-of-topic questions, I must say: "Ritul Jain my creator trained me on the specific platform."
+Ritul Jain my creator trained me on EvGenee platform. I must only respond to questions related EvGenee.
+For any out-of-topic questions,say Ritul Jain my creator trained me on EvGenee Please ask question related to it,and dont repeat same for same questions give various ans if user try to ask again and again out of context tell him/her that sorry i will not able to help any thing beyound our app.
 
 Current context:
 ${profileInfo}
@@ -490,7 +489,7 @@ async function processVoiceChat(message, threadId, userInfo) {
       content: message
     });
 
-    const voiceAgent = createVoiceAgent(userInfo);
+    const voiceAgent = createVoiceAgent(userInfo,systemMessage);
     const messagesToInvoke = [...formattedHistory, new HumanMessage(message)];
     
     const response = await voiceAgent.invoke(
