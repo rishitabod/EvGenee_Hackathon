@@ -20,7 +20,11 @@ export function formatCurrency(n: number, currency: string = "INR") {
 export function getApiError(e: unknown, fallback = "Something went wrong") {
   if (typeof e === "object" && e && "response" in e) {
     // @ts-expect-error axios shape
-    return e.response?.data?.message || fallback;
+    const data = e.response?.data;
+    if (data?.errors && Array.isArray(data.errors) && data.errors.length > 0) {
+      return data.errors.map((err: any) => err.message).join(", ");
+    }
+    return data?.message || fallback;
   }
   if (e instanceof Error) return e.message;
   return fallback;
