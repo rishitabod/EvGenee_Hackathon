@@ -160,14 +160,19 @@ const findBestStationTool = tool(
       queryDate.setHours(0, 0, 0, 0);
       
       const now = new Date();
-      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const indianTimeStr = now.toLocaleString("en-US", { timeZone: "Asia/Kolkata", hour12: false });
+      const [datePart, timePart] = indianTimeStr.split(', ');
+      const [currH, currM] = timePart.split(':').map(Number);
+      const currentMinutes = currH * 60 + currM;
+
+      const today = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+      today.setHours(0, 0, 0, 0);
 
       if (queryDate < today) {
         return JSON.stringify({ error: "Cannot search for past dates." });
       }
 
       if (queryDate.getTime() === today.getTime()) {
-        const currentMinutes = now.getHours() * 60 + now.getMinutes();
         if (timeToMinutes(startTime) <= currentMinutes) {
           return JSON.stringify({ error: "The requested start time has already passed for today. Please provide a future time." });
         }
@@ -335,14 +340,19 @@ const createBookingTool = (userInfo) => tool(
       bookingDate.setHours(0, 0, 0, 0);
 
       const now = new Date();
-      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const indianTimeStr = now.toLocaleString("en-US", { timeZone: "Asia/Kolkata", hour12: false });
+      const [datePart, timePart] = indianTimeStr.split(', ');
+      const [currH, currM] = timePart.split(':').map(Number);
+      const currentMinutes = currH * 60 + currM;
+
+      const today = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+      today.setHours(0, 0, 0, 0);
 
       if (bookingDate < today) {
         return JSON.stringify({ error: "Cannot book for a past date." });
       }
 
       if (bookingDate.getTime() === today.getTime()) {
-        const currentMinutes = now.getHours() * 60 + now.getMinutes();
         if (timeToMinutes(startTime) <= currentMinutes) {
           return JSON.stringify({ error: "Cannot book a time slot in the past for today." });
         }
