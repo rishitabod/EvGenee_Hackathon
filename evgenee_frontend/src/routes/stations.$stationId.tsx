@@ -486,11 +486,14 @@ function StationDetail() {
                     <SelectValue placeholder="Select" />
                   </SelectTrigger>
                   <SelectContent>
-                    {station.typeOfConnectors.map((c) => (
-                      <SelectItem key={c} value={c}>
-                        {c}
-                      </SelectItem>
-                    ))}
+                    {station.typeOfConnectors.map((c) => {
+                      const portCount = station.pricing?.find(p => p.connectorType === c)?.portCount || 1;
+                      return (
+                        <SelectItem key={c} value={c}>
+                          {c} ({portCount} Port{portCount !== 1 ? 's' : ''})
+                        </SelectItem>
+                      );
+                    })}
                   </SelectContent>
                 </Select>
               </div>
@@ -525,9 +528,14 @@ function StationDetail() {
                       )}
                     >
                       {s.startTime}
+                      {s.isAvailable && !expired && (
+                        <span className="text-[10px] block font-normal opacity-80 mt-0.5">
+                          {s.availablePorts} port{s.availablePorts !== 1 && 's'}
+                        </span>
+                      )}
                       {/* ── UPDATE 1: PAST badge ── */}
                       {expired && (
-                        <span className="text-[9px] block font-bold text-destructive leading-tight">
+                        <span className="text-[9px] block font-bold text-destructive leading-tight mt-0.5">
                           PAST
                         </span>
                       )}

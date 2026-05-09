@@ -54,6 +54,7 @@ export type Pricing = {
   priceperKWh: number;
   connectorType: string;
   currency: "INR" | "USD" | "EUR";
+  portCount: number;
 };
 
 export type Station = {
@@ -78,6 +79,7 @@ export type Station = {
   reviews: { userId: string; comment: string; rating: number }[];
   distance?: number;
   distanceKm?: number;
+  peakPricing?: { startTime: string; endTime: string; multiplier: number }[];
 };
 
 export type Booking = {
